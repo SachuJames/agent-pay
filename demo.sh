@@ -44,11 +44,13 @@ cleanup() {
 trap cleanup EXIT
 
 start_api() {
-  (cd "$ROOT/api" && DB_PATH="$TMPD/demo.db" PORT=8787 \
+  cd "$ROOT/api"
+  DB_PATH="$TMPD/demo.db" PORT=8787 \
     ${SETTLEMENT_MINT:+SETTLEMENT_MINT="$SETTLEMENT_MINT"} \
     ${SETTLEMENT_PAYER:+SETTLEMENT_PAYER="$SETTLEMENT_PAYER"} \
-    SOLANA_RPC_URL="$RPC" node dist/index.js >"$TMPD/api.log" 2>&1 &)
+    SOLANA_RPC_URL="$RPC" node dist/index.js >"$TMPD/api.log" 2>&1 &
   API_PID=$!
+  cd "$ROOT"
   for i in $(seq 1 30); do
     curl -sf "$API/health" >/dev/null 2>&1 && return 0
     sleep 1
@@ -61,8 +63,10 @@ echo "[1/8] Building API..."
 (cd "$ROOT/api" && npm run build >/dev/null 2>&1)
 
 echo "[2/8] Starting solana-test-validator..."
-(cd "$TMPD" && $VALIDATOR --reset -q --ledger "$TMPD/ledger" >validator.log 2>&1 &)
+cd "$TMPD"
+$VALIDATOR --reset -q --ledger "$TMPD/ledger" >validator.log 2>&1 &
 VALIDATOR_PID=$!
+cd "$ROOT"
 for i in $(seq 1 60); do
   $SOLANA cluster-version --url "$RPC" >/dev/null 2>&1 && break
   sleep 1
