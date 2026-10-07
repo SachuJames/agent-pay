@@ -44,11 +44,10 @@ cleanup() {
 trap cleanup EXIT
 
 start_api() {
+  # SETTLEMENT_MINT / SETTLEMENT_PAYER / SOLANA_RPC_URL are exported by the
+  # caller when available; the API reads them at settle time.
   cd "$ROOT/api"
-  DB_PATH="$TMPD/demo.db" PORT=8787 \
-    ${SETTLEMENT_MINT:+SETTLEMENT_MINT="$SETTLEMENT_MINT"} \
-    ${SETTLEMENT_PAYER:+SETTLEMENT_PAYER="$SETTLEMENT_PAYER"} \
-    SOLANA_RPC_URL="$RPC" node dist/index.js >"$TMPD/api.log" 2>&1 &
+  DB_PATH="$TMPD/demo.db" PORT=8787 node dist/index.js >"$TMPD/api.log" 2>&1 &
   API_PID=$!
   cd "$ROOT"
   for i in $(seq 1 30); do
