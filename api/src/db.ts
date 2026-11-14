@@ -84,6 +84,7 @@ export function openDb(path: string): DatabaseSync {
   addColumn(db, "payments", "refund_of", "refund_of TEXT REFERENCES payments(id)");
   addColumn(db, "payments", "expires_at", "expires_at INTEGER");
   addColumn(db, "wallets", "frozen_at", "frozen_at INTEGER");
+  addColumn(db, "api_keys", "last_used_at", "last_used_at INTEGER");
   db.exec(`
     CREATE TABLE IF NOT EXISTS settlements (
       id TEXT PRIMARY KEY,

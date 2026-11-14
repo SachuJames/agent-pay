@@ -44,11 +44,18 @@ export function registerAuth(app: FastifyInstance, db: DatabaseSync) {
       return;
     }
     const row = db
-      .prepare("SELECT id, name, scopes, revoked_at FROM api_keys WHERE key_hash = ?")
-      .get(hashKey(raw)) as { id: string; name: string; scopes: string; revoked_at: number | null } | undefined;
+      .prepare("SELECT id, name, scopes, revoked_at, last_used_at FROM api_keys WHERE key_hash = ?")
+      .get(hashKey(raw)) as
+      | { id: string; name: string; scopes: string; revoked_at: number | null; last_used_at: number | null }
+      | undefined;
     if (!row || row.revoked_at !== null) {
       reply.code(401).send({ error: "invalid or revoked api key" });
       return;
+    }
+    // Track last use, throttled to one write a minute per key so the auth
+    // path does not write on every request.
+    if (!row.last_used_at || now() - row.last_used_at > 60_000) {
+      db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), row.id);
     }
     req.apiKey = { id: row.id, name: row.name, scopes: JSON.parse(row.scopes) as Scope[] };
   });

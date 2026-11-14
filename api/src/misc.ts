@@ -23,6 +23,22 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
     }
   });
 
+  app.get("/v1/api-keys", { preHandler: requireScope("admin") }, async () => {
+    const rows = db
+      .prepare("SELECT id, name, scopes, created_at, revoked_at, last_used_at FROM api_keys ORDER BY created_at DESC")
+      .all() as { id: string; name: string; scopes: string; created_at: number; revoked_at: number | null; last_used_at: number | null }[];
+    return {
+      api_keys: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        scopes: JSON.parse(r.scopes),
+        created_at: r.created_at,
+        revoked_at: r.revoked_at,
+        last_used_at: r.last_used_at,
+      })),
+    };
+  });
+
   app.post("/v1/api-keys/:id/revoke", { preHandler: requireScope("admin") }, async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const row = db.prepare("SELECT id FROM api_keys WHERE id = ?").get(id);

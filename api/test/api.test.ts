@@ -452,3 +452,28 @@ describe("wallet statement", () => {
     expect((await app.inject({ method: "GET", url: "/v1/wallets/w_nope/statement", headers: auth() })).statusCode).toBe(404);
   });
 });
+
+describe("api key listing", () => {
+  it("lists keys without hashes and tracks last use", async () => {
+    const created = await postJson("/v1/api-keys", { name: "svc-reader", scopes: ["read"] });
+    expect(created.status).toBe(201);
+    const list1 = await app.inject({ method: "GET", url: "/v1/api-keys", headers: auth() });
+    const keys = list1.json().api_keys as Record<string, unknown>[];
+    const svc = keys.find((k) => k.name === "svc-reader");
+    expect(svc).toBeTruthy();
+    expect(svc!.key_hash).toBeUndefined();
+    expect(svc!.last_used_at).toBeNull();
+
+    const use = await app.inject({ method: "GET", url: "/v1/wallets", headers: { authorization: `Bearer ${created.body.key}` } });
+    expect(use.statusCode).toBe(200);
+    const list2 = await app.inject({ method: "GET", url: "/v1/api-keys", headers: auth() });
+    const svc2 = (list2.json().api_keys as Record<string, unknown>[]).find((k) => k.name === "svc-reader");
+    expect(typeof svc2!.last_used_at).toBe("number");
+  });
+
+  it("requires admin scope to list keys", async () => {
+    const reader = await postJson("/v1/api-keys", { name: "only-reader", scopes: ["read"] });
+    const res = await app.inject({ method: "GET", url: "/v1/api-keys", headers: { authorization: `Bearer ${reader.body.key}` } });
+    expect(res.statusCode).toBe(403);
+  });
+});
