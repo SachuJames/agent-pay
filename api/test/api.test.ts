@@ -400,3 +400,25 @@ describe("wallet freeze", () => {
     expect((await postJson("/v1/wallets/w_nope/freeze", {})).status).toBe(404);
   });
 });
+
+describe("limit usage", () => {
+  it("reports spent and remaining against the daily and weekly caps", async () => {
+    const [w1, w2] = await makeWallets();
+    await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000 });
+    const res = await app.inject({ method: "GET", url: `/v1/wallets/${w1}/limits`, headers: auth() });
+    const body = res.json();
+    expect(body.per_tx_cap_minor).toBe(5000);
+    expect(body.daily.cap_minor).toBe(20000);
+    expect(body.daily.spent_minor).toBe(4000);
+    expect(body.daily.remaining_minor).toBe(16000);
+    expect(body.weekly.spent_minor).toBe(4000);
+    expect((await app.inject({ method: "GET", url: "/v1/wallets/w_nope/limits", headers: auth() })).statusCode).toBe(404);
+  });
+
+  it("does not count held payments as spent", async () => {
+    const [w1, w2] = await makeWallets();
+    await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    const res = await app.inject({ method: "GET", url: `/v1/wallets/${w1}/limits`, headers: auth() });
+    expect(res.json().daily.spent_minor).toBe(0);
+  });
+});

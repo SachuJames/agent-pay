@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import { balanceOf, now } from "./db.js";
+import { balanceOf, now, spendSince } from "./db.js";
 import { assertAmount, formatMinor } from "./money.js";
 import { requireScope } from "./auth.js";
 import { audit } from "./audit.js";
@@ -114,6 +114,33 @@ export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
       return;
     }
     reply.send(rowToWallet(db, row));
+  });
+
+  // How much of each spending window is used up right now. The same numbers
+  // the payment path enforces, so what you see here is what a payment sees.
+  app.get("/v1/wallets/:id/limits", { preHandler: requireScope("read") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const row = db.prepare("SELECT * FROM wallets WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) {
+      reply.code(404).send({ error: "wallet not found" });
+      return;
+    }
+    const dailySpent = spendSince(db, id, 24 * 3600 * 1000);
+    const weeklySpent = spendSince(db, id, 7 * 24 * 3600 * 1000);
+    reply.send({
+      wallet_id: id,
+      per_tx_cap_minor: row.per_tx_cap,
+      daily: {
+        cap_minor: row.daily_cap,
+        spent_minor: dailySpent,
+        remaining_minor: Math.max(0, (row.daily_cap as number) - dailySpent),
+      },
+      weekly: {
+        cap_minor: row.weekly_cap,
+        spent_minor: weeklySpent,
+        remaining_minor: Math.max(0, (row.weekly_cap as number) - weeklySpent),
+      },
+    });
   });
 
   app.patch("/v1/wallets/:id/limits", { preHandler: requireScope("wallets:write") }, async (req, reply) => {
