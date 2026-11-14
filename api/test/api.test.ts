@@ -363,3 +363,40 @@ describe("approval expiry", () => {
     expect(held.body.id).toBeTruthy();
   });
 });
+
+describe("wallet freeze", () => {
+  it("blocks new payments from a frozen wallet until it is unfrozen", async () => {
+    const [w1, w2] = await makeWallets();
+    const frozen = await postJson(`/v1/wallets/${w1}/freeze`, {});
+    expect(frozen.status).toBe(200);
+    expect(frozen.body.frozen).toBe(true);
+    const blocked = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 1000 });
+    expect(blocked.status).toBe(403);
+    // receiving still works while frozen
+    const inbound = await postJson("/v1/payments", { from_wallet: w2, to_wallet: w1, amount: 0 });
+    expect(inbound.status).not.toBe(403);
+    const again = await postJson(`/v1/wallets/${w1}/freeze`, {});
+    expect(again.status).toBe(200);
+    const unfrozen = await postJson(`/v1/wallets/${w1}/unfreeze`, {});
+    expect(unfrozen.body.frozen).toBe(false);
+    const ok = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 1000 });
+    expect(ok.status).toBe(201);
+  });
+
+  it("blocks approving a held payment while the sender is frozen", async () => {
+    const [w1, w2] = await makeWallets();
+    const held = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    expect(held.status).toBe(202);
+    await postJson(`/v1/wallets/${w1}/freeze`, {});
+    const blocked = await postJson(`/v1/approvals/${held.body.id}/approve`, {});
+    expect(blocked.status).toBe(409);
+    await postJson(`/v1/wallets/${w1}/unfreeze`, {});
+    const ok = await postJson(`/v1/approvals/${held.body.id}/approve`, {});
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe("completed");
+  });
+
+  it("404s freezing an unknown wallet", async () => {
+    expect((await postJson("/v1/wallets/w_nope/freeze", {})).status).toBe(404);
+  });
+});

@@ -124,10 +124,16 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
       reply.code(400).send({ error: "amount must be a non-negative integer of minor units" });
       return;
     }
-    const from = db.prepare("SELECT id FROM wallets WHERE id = ?").get(body.from_wallet);
+    const from = db.prepare("SELECT id, frozen_at FROM wallets WHERE id = ?").get(body.from_wallet) as
+      | { id: string; frozen_at: number | null }
+      | undefined;
     const to = db.prepare("SELECT id FROM wallets WHERE id = ?").get(body.to_wallet);
     if (!from || !to) {
       reply.code(404).send({ error: "unknown wallet" });
+      return;
+    }
+    if (from.frozen_at != null) {
+      reply.code(403).send({ error: "sender wallet is frozen" });
       return;
     }
 

@@ -51,6 +51,13 @@ export function registerApprovalRoutes(app: FastifyInstance, db: DatabaseSync) {
       reply.code(409).send({ error: `payment is ${p.status}, not pending_approval` });
       return;
     }
+    const sender = db.prepare("SELECT frozen_at FROM wallets WHERE id = ?").get(p.from_wallet as string) as
+      | { frozen_at: number | null }
+      | undefined;
+    if (sender && sender.frozen_at != null) {
+      reply.code(409).send({ error: "sender wallet is frozen; unfreeze it to approve" });
+      return;
+    }
     // Re-check funds at decision time: money may have moved while pending.
     if (balanceOf(db, p.from_wallet as string) < (p.amount as number)) {
       db.prepare("UPDATE payments SET status='failed', decided_at=?, decided_by=?, reason_code='insufficient_funds' WHERE id = ?").run(

@@ -34,8 +34,17 @@ function rowToWallet(db: DatabaseSync, row: Record<string, unknown>) {
     },
     solana_address: row.solana_pubkey,
     evm_address: row.evm_address,
+    frozen: row.frozen_at != null,
+    frozen_at: (row.frozen_at as number | null) ?? null,
     created_at: row.created_at,
   };
+}
+
+export function isFrozen(db: DatabaseSync, walletId: string): boolean {
+  const row = db.prepare("SELECT frozen_at FROM wallets WHERE id = ?").get(walletId) as
+    | { frozen_at: number | null }
+    | undefined;
+  return !!row && row.frozen_at != null;
 }
 
 export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
@@ -132,6 +141,30 @@ export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
     const updated = db.prepare("SELECT * FROM wallets WHERE id = ?").get(id) as Record<string, unknown>;
     reply.send(rowToWallet(db, updated));
   });
+
+  // Freeze or unfreeze a wallet. A frozen wallet cannot send payments and
+  // its held payments cannot be approved until it is unfrozen; receiving
+  // money stays allowed, so a freeze never traps other people's funds.
+  for (const action of ["freeze", "unfreeze"] as const) {
+    app.post(`/v1/wallets/:id/${action}`, { preHandler: requireScope("wallets:write") }, async (req, reply) => {
+      const id = (req.params as { id: string }).id;
+      const row = db.prepare("SELECT * FROM wallets WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+      if (!row) {
+        reply.code(404).send({ error: "wallet not found" });
+        return;
+      }
+      const frozen = row.frozen_at != null;
+      if ((action === "freeze") === frozen) {
+        reply.send(rowToWallet(db, row));
+        return;
+      }
+      db.prepare("UPDATE wallets SET frozen_at = ? WHERE id = ?").run(action === "freeze" ? now() : null, id);
+      audit(db, req.apiKey.name, action === "freeze" ? "wallet.frozen" : "wallet.unfrozen", "wallet", id, {});
+      emit(db, action === "freeze" ? "wallet.frozen" : "wallet.unfrozen", { wallet_id: id });
+      const updated = db.prepare("SELECT * FROM wallets WHERE id = ?").get(id) as Record<string, unknown>;
+      reply.send(rowToWallet(db, updated));
+    });
+  }
 
   // Fund a wallet from the treasury (test/dev helper, keeps double-entry intact).
   app.post("/v1/wallets/:id/fund", { preHandler: requireScope("wallets:write") }, async (req, reply) => {
