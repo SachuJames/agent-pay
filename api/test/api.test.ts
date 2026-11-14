@@ -422,3 +422,33 @@ describe("limit usage", () => {
     expect(res.json().daily.spent_minor).toBe(0);
   });
 });
+
+describe("wallet statement", () => {
+  it("lists entries newest first with a running balance that lands on the wallet balance", async () => {
+    const [w1, w2] = await makeWallets();
+    await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000, memo: "api credits" });
+    const res = await app.inject({ method: "GET", url: `/v1/wallets/${w1}/statement`, headers: auth() });
+    const body = res.json();
+    expect(body.balance_minor).toBe(96000);
+    expect(body.entries.length).toBe(2);
+    const [debit, funding] = body.entries;
+    expect(debit.direction).toBe("debit");
+    expect(debit.amount_minor).toBe(4000);
+    expect(debit.counterparty).toBe(w2);
+    expect(debit.memo).toBe("api credits");
+    expect(debit.balance_after_minor).toBe(96000);
+    expect(funding.direction).toBe("credit");
+    expect(funding.balance_after_minor).toBe(100000);
+
+    const recv = await app.inject({ method: "GET", url: `/v1/wallets/${w2}/statement`, headers: auth() });
+    expect(recv.json().entries[0].direction).toBe("credit");
+    expect(recv.json().entries[0].balance_after_minor).toBe(4000);
+  });
+
+  it("respects limit and 404s unknown wallets", async () => {
+    const [w1] = await makeWallets();
+    const res = await app.inject({ method: "GET", url: `/v1/wallets/${w1}/statement?limit=1`, headers: auth() });
+    expect(res.json().entries.length).toBe(1);
+    expect((await app.inject({ method: "GET", url: "/v1/wallets/w_nope/statement", headers: auth() })).statusCode).toBe(404);
+  });
+});

@@ -116,6 +116,53 @@ export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
     reply.send(rowToWallet(db, row));
   });
 
+  // Wallet statement: every ledger entry with the running balance after it.
+  // The ledger is the source of truth, so the last entry's balance_after
+  // always equals the wallet balance.
+  app.get("/v1/wallets/:id/statement", { preHandler: requireScope("read") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const q = req.query as { limit?: string; since?: string };
+    const limit = Math.min(Number(q.limit ?? 50) || 50, 500);
+    const row = db.prepare("SELECT id FROM wallets WHERE id = ?").get(id);
+    if (!row) {
+      reply.code(404).send({ error: "wallet not found" });
+      return;
+    }
+    const rows = db
+      .prepare(
+        `SELECT l.id, l.payment_id, l.direction, l.amount, l.created_at, p.memo,
+                CASE WHEN l.direction = 'debit' THEN p.to_wallet ELSE p.from_wallet END AS counterparty
+         FROM ledger_entries l JOIN payments p ON p.id = l.payment_id
+         WHERE l.wallet_id = ? ORDER BY l.id ASC`
+      )
+      .all(id) as {
+      id: number;
+      payment_id: string;
+      direction: string;
+      amount: number;
+      created_at: number;
+      memo: string;
+      counterparty: string;
+    }[];
+    let running = 0;
+    const entries = rows.map((r) => {
+      running += r.direction === "credit" ? r.amount : -r.amount;
+      return {
+        id: r.id,
+        payment_id: r.payment_id,
+        direction: r.direction,
+        amount_minor: r.amount,
+        counterparty: r.counterparty,
+        memo: r.memo,
+        balance_after_minor: running,
+        created_at: r.created_at,
+      };
+    });
+    const since = q.since ? Number(q.since) : null;
+    const filtered = since ? entries.filter((e) => e.created_at >= since) : entries;
+    reply.send({ wallet_id: id, balance_minor: balanceOf(db, id), entries: filtered.slice(-limit).reverse() });
+  });
+
   // How much of each spending window is used up right now. The same numbers
   // the payment path enforces, so what you see here is what a payment sees.
   app.get("/v1/wallets/:id/limits", { preHandler: requireScope("read") }, async (req, reply) => {
