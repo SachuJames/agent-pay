@@ -83,7 +83,10 @@ async function deliverOnce(db: DatabaseSync, id: number): Promise<void> {
 /** Drain due deliveries. Called on a timer and directly in tests. */
 export async function drainWebhooks(db: DatabaseSync): Promise<number> {
   const due = db
-    .prepare("SELECT id FROM webhook_deliveries WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)")
+    .prepare(
+      `SELECT d.id FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id = d.endpoint_id
+       WHERE d.status = 'queued' AND e.active = 1 AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)`
+    )
     .all(now()) as { id: number }[];
   for (const d of due) await deliverOnce(db, d.id);
   return due.length;

@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { requireScope, createApiKey, type Scope } from "./auth.js";
 import { audit } from "./audit.js";
 import { createEndpoint } from "./webhooks.js";
+import { withTx } from "./db.js";
 
 export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
   app.get("/health", async () => ({ ok: true, service: "agentpay-api" }));
@@ -70,6 +71,41 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
   app.get("/v1/webhooks", { preHandler: requireScope("read") }, async () => {
     const rows = db.prepare("SELECT id, url, events, active, created_at FROM webhook_endpoints ORDER BY created_at DESC").all();
     return { webhooks: rows };
+  });
+
+  // Pause or resume a subscription. Pausing stops new deliveries and holds
+  // queued ones in place; resuming lets the drain pick them up again.
+  app.patch("/v1/webhooks/:id", { preHandler: requireScope("admin") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const body = (req.body ?? {}) as { active?: boolean };
+    const row = db.prepare("SELECT * FROM webhook_endpoints WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) {
+      reply.code(404).send({ error: "webhook not found" });
+      return;
+    }
+    if (typeof body.active !== "boolean") {
+      reply.code(400).send({ error: "active (boolean) is required" });
+      return;
+    }
+    db.prepare("UPDATE webhook_endpoints SET active = ? WHERE id = ?").run(body.active ? 1 : 0, id);
+    audit(db, req.apiKey.name, "webhook.updated", "webhook", id, { active: body.active });
+    const updated = db.prepare("SELECT id, url, events, active, created_at FROM webhook_endpoints WHERE id = ?").get(id);
+    reply.send(updated);
+  });
+
+  app.delete("/v1/webhooks/:id", { preHandler: requireScope("admin") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const row = db.prepare("SELECT id FROM webhook_endpoints WHERE id = ?").get(id);
+    if (!row) {
+      reply.code(404).send({ error: "webhook not found" });
+      return;
+    }
+    withTx(db, () => {
+      db.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id = ?").run(id);
+      db.prepare("DELETE FROM webhook_endpoints WHERE id = ?").run(id);
+    });
+    audit(db, req.apiKey.name, "webhook.deleted", "webhook", id, {});
+    reply.send({ id, deleted: true });
   });
 
   app.get("/v1/webhook-deliveries", { preHandler: requireScope("read") }, async (req) => {

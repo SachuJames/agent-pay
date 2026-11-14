@@ -493,3 +493,45 @@ describe("metrics", () => {
     expect(body.api_keys.active).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("webhook management", () => {
+  it("pauses deliveries while inactive and resumes them after", async () => {
+    const received: string[] = [];
+    const server = createServer((req, res) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        received.push(data);
+        res.writeHead(200).end("ok");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as AddressInfo).port;
+    const sub = await postJson("/v1/webhooks", { url: `http://127.0.0.1:${port}/hook`, events: ["payment.completed"] });
+    expect(sub.status).toBe(201);
+
+    const paused = await patchJson(`/v1/webhooks/${sub.body.id}`, { active: false });
+    expect(paused.status).toBe(200);
+    expect(paused.body.active).toBe(0);
+    await makeWallets();
+    await drainWebhooks(db);
+    expect(received.length).toBe(0);
+
+    await patchJson(`/v1/webhooks/${sub.body.id}`, { active: true });
+    await drainWebhooks(db);
+    expect(received.length).toBeGreaterThan(0);
+    server.close();
+  });
+
+  it("deletes a subscription along with its queued deliveries", async () => {
+    const sub = await postJson("/v1/webhooks", { url: "http://127.0.0.1:9/hook", events: ["wallet.created"] });
+    await postJson("/v1/wallets", { agent_id: "a9", name: "queued" });
+    const del = await reqJson("DELETE", `/v1/webhooks/${sub.body.id}`, {});
+    expect(del.status).toBe(200);
+    const list = await app.inject({ method: "GET", url: "/v1/webhooks", headers: auth() });
+    expect((list.json().webhooks as { id: string }[]).some((w) => w.id === sub.body.id)).toBe(false);
+    const deliveries = await app.inject({ method: "GET", url: "/v1/webhook-deliveries", headers: auth() });
+    expect((deliveries.json().deliveries as { endpoint_id: string }[]).some((d) => d.endpoint_id === sub.body.id)).toBe(false);
+    expect((await reqJson("DELETE", `/v1/webhooks/${sub.body.id}`, {})).status).toBe(404);
+  });
+});
