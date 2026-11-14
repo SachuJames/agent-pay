@@ -477,3 +477,19 @@ describe("api key listing", () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+describe("metrics", () => {
+  it("summarises wallets, payments and volume", async () => {
+    const [w1, w2] = await makeWallets();
+    await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000 });
+    await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    const res = await app.inject({ method: "GET", url: "/v1/metrics", headers: auth() });
+    const body = res.json();
+    expect(body.wallets).toBe(3);
+    expect(body.payments.total).toBe(3);
+    expect(body.payments.by_status.completed).toBe(2);
+    expect(body.payments.by_status.pending_approval).toBe(1);
+    expect(body.payments.completed_volume_minor).toBe(104000);
+    expect(body.api_keys.active).toBeGreaterThanOrEqual(1);
+  });
+});

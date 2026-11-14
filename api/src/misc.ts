@@ -79,6 +79,37 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
     return { deliveries: rows };
   });
 
+  // Operational summary for dashboards and alerting: counts and volume,
+  // computed straight from the tables, no separate stats store to drift.
+  app.get("/v1/metrics", { preHandler: requireScope("admin") }, async () => {
+    const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+    const byStatus = db.prepare("SELECT status, COUNT(*) AS n FROM payments GROUP BY status").all() as {
+      status: string;
+      n: number;
+    }[];
+    const deliveries = db.prepare("SELECT status, COUNT(*) AS n FROM webhook_deliveries GROUP BY status").all() as {
+      status: string;
+      n: number;
+    }[];
+    const toMap = (rows: { status: string; n: number }[]) => Object.fromEntries(rows.map((r) => [r.status, r.n]));
+    return {
+      wallets: count("SELECT COUNT(*) AS n FROM wallets"),
+      payments: {
+        total: count("SELECT COUNT(*) AS n FROM payments"),
+        by_status: toMap(byStatus),
+        completed_volume_minor: count(
+          "SELECT COALESCE(SUM(amount), 0) AS n FROM payments WHERE status = 'completed' AND refund_of IS NULL"
+        ),
+      },
+      webhook_endpoints_active: count("SELECT COUNT(*) AS n FROM webhook_endpoints WHERE active = 1"),
+      webhook_deliveries: toMap(deliveries),
+      api_keys: {
+        active: count("SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL"),
+        revoked: count("SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NOT NULL"),
+      },
+    };
+  });
+
   // Audit log (read-only; append-only by design).
   app.get("/v1/audit", { preHandler: requireScope("read") }, async (req) => {
     const q = req.query as { entity?: string; entity_id?: string; limit?: string };
