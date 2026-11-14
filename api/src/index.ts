@@ -4,7 +4,7 @@ import { registerAuth, createApiKey } from "./auth.js";
 import { registerRateLimit } from "./ratelimit.js";
 import { registerWalletRoutes, ensureTreasury } from "./wallets.js";
 import { registerPaymentRoutes } from "./payments.js";
-import { registerApprovalRoutes } from "./approvals.js";
+import { registerApprovalRoutes, expireStaleApprovals } from "./approvals.js";
 import { registerSettlementRoutes } from "./settle.js";
 import { registerMiscRoutes } from "./misc.js";
 import { drainWebhooks } from "./webhooks.js";
@@ -33,6 +33,17 @@ export async function buildApp(dbPath = DB_PATH) {
     drainWebhooks(db).catch(() => {});
   }, 2000);
   timer.unref();
+
+  // Held payments do not wait forever; sweep expiries in the background too
+  // (the approval routes also expire lazily on read and on decision).
+  const expiryTimer = setInterval(() => {
+    try {
+      expireStaleApprovals(db);
+    } catch {
+      // next sweep retries
+    }
+  }, 30000);
+  expiryTimer.unref();
 
   return { app, db };
 }

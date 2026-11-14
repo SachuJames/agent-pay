@@ -7,7 +7,10 @@ import { requireScope } from "./auth.js";
 import { audit } from "./audit.js";
 import { emit } from "./webhooks.js";
 
-export type PaymentStatus = "pending_approval" | "completed" | "rejected" | "failed";
+export type PaymentStatus = "pending_approval" | "completed" | "rejected" | "failed" | "expired";
+
+/** How long a held payment waits for a decision before it expires. */
+export const APPROVAL_TTL_MS = Number(process.env.APPROVAL_TTL_MS ?? 24 * 3600 * 1000);
 
 export function paymentView(p: Record<string, unknown>, refundedMinor = 0) {
   return {
@@ -21,6 +24,7 @@ export function paymentView(p: Record<string, unknown>, refundedMinor = 0) {
     reason_code: p.reason_code,
     refund_of: (p.refund_of as string | null) ?? null,
     refunded_minor: refundedMinor,
+    expires_at: (p.expires_at as number | null) ?? null,
     created_at: p.created_at,
     decided_at: p.decided_at,
     decided_by: p.decided_by,
@@ -158,8 +162,8 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
     if (!verdict.ok) {
       const t = now();
       db.prepare(
-        "INSERT INTO payments (id, from_wallet, to_wallet, amount, memo, status, idempotency_key, created_at, reason_code) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?)"
-      ).run(id, payment.from, payment.to, payment.amount, payment.memo, idemKey, t, verdict.reason);
+        "INSERT INTO payments (id, from_wallet, to_wallet, amount, memo, status, idempotency_key, created_at, reason_code, expires_at) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?)"
+      ).run(id, payment.from, payment.to, payment.amount, payment.memo, idemKey, t, verdict.reason, t + APPROVAL_TTL_MS);
       audit(db, req.apiKey.name, "payment.held_for_approval", "payment", id, {
         reason: verdict.reason,
         amount: payment.amount,

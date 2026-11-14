@@ -5,6 +5,7 @@ import { buildApp } from "../src/index.js";
 import { createApiKey } from "../src/auth.js";
 import { resetBuckets } from "../src/ratelimit.js";
 import { signPayload, verifySignature, drainWebhooks } from "../src/webhooks.js";
+import { expireStaleApprovals } from "../src/approvals.js";
 import { add, sub, formatMinor, parseMajor } from "../src/money.js";
 import type { FastifyInstance } from "fastify";
 import type { DatabaseSync } from "node:sqlite";
@@ -328,5 +329,37 @@ describe("refunds", () => {
     expect(back.status).toBe(201);
     const refund = await postJson(`/v1/payments/${pay.body.id}/refund`, {});
     expect(refund.status).toBe(402);
+  });
+});
+
+describe("approval expiry", () => {
+  it("stamps an expiry on held payments and expires them once it passes", async () => {
+    const [w1, w2] = await makeWallets();
+    const held = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    expect(held.status).toBe(202);
+    expect(held.body.expires_at).toBeGreaterThan(held.body.created_at);
+
+    db.prepare("UPDATE payments SET expires_at = ? WHERE id = ?").run(Date.now() - 1000, held.body.id);
+    expect(expireStaleApprovals(db)).toBe(1);
+
+    const after = await app.inject({ method: "GET", url: `/v1/payments/${held.body.id}`, headers: auth() });
+    expect(after.json().status).toBe("expired");
+    expect(after.json().reason_code).toBe("approval_expired");
+
+    const approve = await postJson(`/v1/approvals/${held.body.id}/approve`, {});
+    expect(approve.status).toBe(409);
+
+    const auditRes = await app.inject({ method: "GET", url: `/v1/audit?entity=payment&entity_id=${held.body.id}`, headers: auth() });
+    const actions = (auditRes.json().audit as { action: string }[]).map((a) => a.action);
+    expect(actions).toContain("payment.expired");
+  });
+
+  it("leaves unexpired held payments alone", async () => {
+    const [w1, w2] = await makeWallets();
+    const held = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    expect(expireStaleApprovals(db)).toBe(0);
+    const pending = await app.inject({ method: "GET", url: "/v1/approvals/pending", headers: auth() });
+    expect((pending.json().pending as unknown[]).length).toBe(1);
+    expect(held.body.id).toBeTruthy();
   });
 });

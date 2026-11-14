@@ -6,9 +6,30 @@ import { audit } from "./audit.js";
 import { emit } from "./webhooks.js";
 import { paymentView, writeLedgerEntries } from "./payments.js";
 
+/**
+ * Expire held payments whose decision window has closed. A held payment is
+ * not a reservation forever: past expires_at it can no longer be approved,
+ * so the sender's limit headroom is not tied up by stale requests.
+ */
+export function expireStaleApprovals(db: DatabaseSync): number {
+  const stale = db
+    .prepare("SELECT id FROM payments WHERE status = 'pending_approval' AND expires_at IS NOT NULL AND expires_at <= ?")
+    .all(now()) as { id: string }[];
+  for (const row of stale) {
+    db.prepare("UPDATE payments SET status='expired', decided_at=?, decided_by='system', reason_code='approval_expired' WHERE id = ?").run(
+      now(),
+      row.id
+    );
+    audit(db, "system", "payment.expired", "payment", row.id, { reason: "approval_expired" });
+    emit(db, "payment.expired", { payment_id: row.id, reason_code: "approval_expired" });
+  }
+  return stale.length;
+}
+
 export function registerApprovalRoutes(app: FastifyInstance, db: DatabaseSync) {
 
   app.get("/v1/approvals/pending", { preHandler: requireScope("read") }, async (req) => {
+    expireStaleApprovals(db);
     const q = req.query as { limit?: string };
     const limit = Math.min(Number(q.limit ?? 50) || 50, 200);
     const rows = db
@@ -18,6 +39,7 @@ export function registerApprovalRoutes(app: FastifyInstance, db: DatabaseSync) {
   });
 
   app.post("/v1/approvals/:id/approve", { preHandler: requireScope("approvals:write") }, async (req, reply) => {
+    expireStaleApprovals(db);
     const id = (req.params as { id: string }).id;
     const body = (req.body ?? {}) as { reason_code?: string };
     const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -59,6 +81,7 @@ export function registerApprovalRoutes(app: FastifyInstance, db: DatabaseSync) {
   });
 
   app.post("/v1/approvals/:id/reject", { preHandler: requireScope("approvals:write") }, async (req, reply) => {
+    expireStaleApprovals(db);
     const id = (req.params as { id: string }).id;
     const body = (req.body ?? {}) as { reason_code?: string };
     const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id) as Record<string, unknown> | undefined;
