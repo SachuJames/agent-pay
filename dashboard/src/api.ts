@@ -33,4 +33,8 @@ export const api = {
   reject: (id: string) => req("POST", `/v1/approvals/${id}/reject`, { reason_code: "dashboard_rejection" }),
   settle: (id: string, rail: string) => req("POST", `/v1/payments/${id}/settle`, { rail }),
   audit: () => req("GET", "/v1/audit?limit=100"),
+  walletLimits: (id: string) => req("GET", `/v1/wallets/${id}/limits`),
+  freeze: (id: string) => req("POST", `/v1/wallets/${id}/freeze`, {}),
+  unfreeze: (id: string) => req("POST", `/v1/wallets/${id}/unfreeze`, {}),
+  refund: (id: string) => req("POST", `/v1/payments/${id}/refund`, {}),
 };

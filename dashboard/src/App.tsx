@@ -21,6 +21,10 @@ const css = `
   .completed { background: #0d3b2e; color: #34d399; }
   .pending_approval { background: #3d2f0d; color: #fbbf24; }
   .rejected, .failed { background: #3d1512; color: #f87171; }
+  .expired { background: #2a2f38; color: #9fb0c3; }
+  .frozen { background: #1e3a5f; color: #7cc4ff; }
+  .bar { height: 6px; background: #1e2836; border-radius: 3px; overflow: hidden; margin-top: 3px; }
+  .bar i { display: block; height: 100%; background: #22d3ee; }
   input, select { background: #0b0f14; border: 1px solid #26303d; color: #e6edf3; padding: 8px 10px; border-radius: 8px; font-size: 14px; }
   button.primary { background: #0e7490; color: #fff; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
   button.ghost { background: transparent; color: #9fb0c3; border: 1px solid #26303d; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-right: 6px; }
@@ -34,13 +38,34 @@ const css = `
 `;
 
 interface Wallet {
-  id: string; name: string; agent_id: string; balance: string;
+  id: string; name: string; agent_id: string; balance: string; frozen?: boolean;
   limits: { per_tx_cap: number; daily_cap: number; weekly_cap: number };
   solana_address: string; evm_address: string;
 }
 interface Payment {
   id: string; from_wallet: string; to_wallet: string; amount: string;
   memo: string; status: string; reason_code: string | null; created_at: number;
+  refund_of?: string | null; refunded_minor?: number;
+}
+interface LimitUsage {
+  daily: { cap_minor: number; spent_minor: number; remaining_minor: number };
+  weekly: { cap_minor: number; spent_minor: number; remaining_minor: number };
+}
+
+function WalletUsage({ id }: { id: string }) {
+  const { data } = usePoll(async () => (await api.walletLimits(id)) as LimitUsage, [id]);
+  if (!data) return null;
+  const bar = (spent: number, cap: number) => (
+    <div className="bar"><i style={{ width: `${Math.min(100, cap ? (spent / cap) * 100 : 0)}%` }} /></div>
+  );
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="muted">today ${(data.daily.spent_minor / 100).toFixed(0)} of ${(data.daily.cap_minor / 100).toFixed(0)} spent</div>
+      {bar(data.daily.spent_minor, data.daily.cap_minor)}
+      <div className="muted" style={{ marginTop: 6 }}>this week ${(data.weekly.spent_minor / 100).toFixed(0)} of ${(data.weekly.cap_minor / 100).toFixed(0)} spent</div>
+      {bar(data.weekly.spent_minor, data.weekly.cap_minor)}
+    </div>
+  );
 }
 interface AuditRow { id: number; actor: string; action: string; entity: string; entity_id: string; created_at: number; details: string }
 
@@ -99,14 +124,17 @@ function Wallets() {
           <div className="card" key={w.id}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <strong>{w.name}</strong>
+              {w.frozen && <span className="pill frozen">frozen</span>}
               <span className="mono muted">{w.id}</span>
             </div>
             <div style={{ fontSize: 28, fontWeight: 800, margin: "8px 0" }}>${w.balance}</div>
             <div className="muted">agent: {w.agent_id}</div>
             <div className="muted mono" style={{ marginTop: 6 }}>sol: {w.solana_address?.slice(0, 12)}...</div>
             <div className="muted">limits: tx ${(+w.limits.per_tx_cap / 100).toFixed(0)} / day ${(+w.limits.daily_cap / 100).toFixed(0)} / wk ${(+w.limits.weekly_cap / 100).toFixed(0)}</div>
+            <WalletUsage id={w.id} />
             <div className="row" style={{ marginTop: 10, marginBottom: 0 }}>
               <button className="ghost" onClick={async () => { await api.fund(w.id, 100000); reload(); }}>Fund $1,000</button>
+              <button className="ghost" onClick={async () => { await (w.frozen ? api.unfreeze(w.id) : api.freeze(w.id)); reload(); }}>{w.frozen ? "Unfreeze" : "Freeze"}</button>
             </div>
           </div>
         ))}
@@ -128,6 +156,7 @@ function Payments() {
     reload();
   };
   const settle = async (id: string, rail: string) => { await api.settle(id, rail); reload(); };
+  const refund = async (id: string) => { await api.refund(id); reload(); };
   const opts = (wallets?.wallets ?? []).map((w) => <option key={w.id} value={w.id}>{w.name} (${w.id})</option>);
   return (
     <div>
@@ -152,7 +181,7 @@ function Payments() {
                 <td className="mono">{p.id}</td>
                 <td className="mono">{p.from_wallet}</td>
                 <td className="mono">{p.to_wallet}</td>
-                <td>${p.amount}</td>
+                <td>${p.amount}{p.refunded_minor ? <div className="muted">refunded ${(p.refunded_minor / 100).toFixed(2)}</div> : null}</td>
                 <td><span className={`pill ${p.status}`}>{p.status}{p.reason_code ? ` (${p.reason_code})` : ""}</span></td>
                 <td>{p.memo}</td>
                 <td>
@@ -160,6 +189,7 @@ function Payments() {
                     <>
                       <button className="ghost" onClick={() => settle(p.id, "solana")}>Settle SOL</button>
                       <button className="ghost" onClick={() => settle(p.id, "evm")}>Settle EVM</button>
+                      {!p.refund_of && <button className="ghost" onClick={() => refund(p.id)}>Refund</button>}
                     </>
                   )}
                 </td>
