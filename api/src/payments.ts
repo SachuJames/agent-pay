@@ -9,7 +9,7 @@ import { emit } from "./webhooks.js";
 
 export type PaymentStatus = "pending_approval" | "completed" | "rejected" | "failed";
 
-export function paymentView(p: Record<string, unknown>) {
+export function paymentView(p: Record<string, unknown>, refundedMinor = 0) {
   return {
     id: p.id,
     from_wallet: p.from_wallet,
@@ -19,10 +19,20 @@ export function paymentView(p: Record<string, unknown>) {
     memo: p.memo,
     status: p.status,
     reason_code: p.reason_code,
+    refund_of: (p.refund_of as string | null) ?? null,
+    refunded_minor: refundedMinor,
     created_at: p.created_at,
     decided_at: p.decided_at,
     decided_by: p.decided_by,
   };
+}
+
+/** Total already refunded against a payment (completed refunds only). */
+export function refundedTotal(db: DatabaseSync, paymentId: string): number {
+  const row = db
+    .prepare("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE refund_of = ? AND status = 'completed'")
+    .get(paymentId) as { s: number };
+  return row.s;
 }
 
 export interface NewPayment {
@@ -193,7 +203,7 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
     const rows = db
       .prepare(`SELECT * FROM payments ${where} ORDER BY created_at DESC LIMIT ?`)
       .all(...vals, limit) as Record<string, unknown>[];
-    return { payments: rows.map((r) => paymentView(r)) };
+    return { payments: rows.map((r) => paymentView(r, refundedTotal(db, r.id as string))) };
   });
 
   app.get("/v1/payments/:id", { preHandler: requireScope("read") }, async (req, reply) => {
@@ -204,6 +214,82 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
       reply.code(404).send({ error: "payment not found" });
       return;
     }
-    reply.send(paymentView(p));
+    reply.send(paymentView(p, refundedTotal(db, p.id as string)));
+  });
+
+  // Refund a completed payment, in full or in part. Refunds run backwards
+  // (original recipient pays the sender back) as their own completed payment
+  // linked with refund_of; they skip spending caps, since returning money is
+  // not spending, but the recipient's balance is still checked, so a refund
+  // cannot pull money that is no longer there.
+  app.post("/v1/payments/:id/refund", { preHandler: requireScope("payments:write") }, async (req, reply) => {
+    const origId = (req.params as { id: string }).id;
+    const body = (req.body ?? {}) as { amount?: number; memo?: string };
+    const orig = db.prepare("SELECT * FROM payments WHERE id = ?").get(origId) as Record<string, unknown> | undefined;
+    if (!orig) {
+      reply.code(404).send({ error: "payment not found" });
+      return;
+    }
+    const idemKey = (req.headers["idempotency-key"] as string) || null;
+    if (idemKey) {
+      const existing = db.prepare("SELECT * FROM payments WHERE idempotency_key = ?").get(idemKey) as
+        | Record<string, unknown>
+        | undefined;
+      if (existing) {
+        reply.send(paymentView(existing));
+        return;
+      }
+    }
+    if (orig.status !== "completed") {
+      reply.code(409).send({ error: `only completed payments can be refunded (this one is ${orig.status})` });
+      return;
+    }
+    if (orig.refund_of) {
+      reply.code(409).send({ error: "a refund cannot itself be refunded" });
+      return;
+    }
+    const already = refundedTotal(db, origId);
+    const remaining = (orig.amount as number) - already;
+    const amount = body.amount ?? remaining;
+    try {
+      assertAmount(amount);
+    } catch {
+      reply.code(400).send({ error: "amount must be a non-negative integer of minor units" });
+      return;
+    }
+    if (amount <= 0) {
+      reply.code(400).send({ error: "amount must be positive" });
+      return;
+    }
+    if (amount > remaining) {
+      reply.code(409).send({ error: "refund exceeds the refundable remainder", refundable_minor: remaining });
+      return;
+    }
+    const id = "pay_" + randomUUID().slice(0, 12);
+    const refund: NewPayment = {
+      id,
+      from: orig.to_wallet as string,
+      to: orig.from_wallet as string,
+      amount,
+      memo: body.memo ?? `refund of ${origId}`,
+      idempotencyKey: idemKey,
+    };
+    try {
+      withTx(db, () => {
+        if (balanceOf(db, refund.from) < amount) throw new Error("insufficient funds");
+        const t = now();
+        db.prepare(
+          "INSERT INTO payments (id, from_wallet, to_wallet, amount, memo, status, idempotency_key, created_at, decided_at, decided_by, refund_of) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?)"
+        ).run(id, refund.from, refund.to, amount, refund.memo, idemKey, t, t, req.apiKey.name, origId);
+        writeLedgerEntries(db, id, refund.from, refund.to, amount);
+      });
+    } catch (err) {
+      reply.code(402).send({ error: String(err instanceof Error ? err.message : err) });
+      return;
+    }
+    audit(db, req.apiKey.name, "payment.refunded", "payment", origId, { refund_id: id, amount });
+    emit(db, "payment.refunded", { payment_id: id, refund_of: origId, amount });
+    const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
+    reply.code(201).send(paymentView(p as Record<string, unknown>));
   });
 }

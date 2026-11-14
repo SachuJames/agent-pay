@@ -281,3 +281,52 @@ describe("evm settlement", () => {
     expect(s.status).toBe(409);
   });
 });
+
+describe("refunds", () => {
+  it("refunds a completed payment in full and restores balances", async () => {
+    const [w1, w2] = await makeWallets();
+    const pay = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000 });
+    expect(pay.status).toBe(201);
+    const refund = await postJson(`/v1/payments/${pay.body.id}/refund`, {});
+    expect(refund.status).toBe(201);
+    expect(refund.body.refund_of).toBe(pay.body.id);
+    expect(refund.body.from_wallet).toBe(w2);
+    expect(refund.body.to_wallet).toBe(w1);
+    const after = await app.inject({ method: "GET", url: `/v1/payments/${pay.body.id}`, headers: auth() });
+    expect(after.json().refunded_minor).toBe(4000);
+    const w1After = await app.inject({ method: "GET", url: `/v1/wallets/${w1}`, headers: auth() });
+    expect(w1After.json().balance_minor).toBe(100000);
+    expect(ledgerSum()).toBe(0);
+  });
+
+  it("caps cumulative partial refunds at the original amount", async () => {
+    const [w1, w2] = await makeWallets();
+    const pay = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000 });
+    expect((await postJson(`/v1/payments/${pay.body.id}/refund`, { amount: 1500 })).status).toBe(201);
+    expect((await postJson(`/v1/payments/${pay.body.id}/refund`, { amount: 1500 })).status).toBe(201);
+    const over = await postJson(`/v1/payments/${pay.body.id}/refund`, { amount: 1500 });
+    expect(over.status).toBe(409);
+    expect(over.body.refundable_minor).toBe(1000);
+    expect((await postJson(`/v1/payments/${pay.body.id}/refund`, { amount: 1000 })).status).toBe(201);
+  });
+
+  it("refuses to refund held payments or other refunds", async () => {
+    const [w1, w2] = await makeWallets();
+    const held = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 9000 });
+    expect(held.status).toBe(202);
+    expect((await postJson(`/v1/payments/${held.body.id}/refund`, {})).status).toBe(409);
+    const pay = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 2000 });
+    const refund = await postJson(`/v1/payments/${pay.body.id}/refund`, {});
+    expect(refund.status).toBe(201);
+    expect((await postJson(`/v1/payments/${refund.body.id}/refund`, {})).status).toBe(409);
+  });
+
+  it("fails when the recipient has already spent the money", async () => {
+    const [w1, w2] = await makeWallets();
+    const pay = await postJson("/v1/payments", { from_wallet: w1, to_wallet: w2, amount: 4000 });
+    const back = await postJson("/v1/payments", { from_wallet: w2, to_wallet: w1, amount: 4000 });
+    expect(back.status).toBe(201);
+    const refund = await postJson(`/v1/payments/${pay.body.id}/refund`, {});
+    expect(refund.status).toBe(402);
+  });
+});

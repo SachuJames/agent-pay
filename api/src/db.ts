@@ -80,6 +80,9 @@ export function openDb(path: string): DatabaseSync {
       next_attempt_at INTEGER,
       last_error TEXT
     );
+  `);
+  addColumn(db, "payments", "refund_of", "refund_of TEXT REFERENCES payments(id)");
+  db.exec(`
     CREATE TABLE IF NOT EXISTS settlements (
       id TEXT PRIMARY KEY,
       payment_id TEXT NOT NULL REFERENCES payments(id),
@@ -91,6 +94,12 @@ export function openDb(path: string): DatabaseSync {
     );
   `);
   return db;
+}
+
+/** Add a column to an existing table when it is missing (poor man's migration). */
+export function addColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 
 export function now(): number {
