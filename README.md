@@ -13,11 +13,14 @@ Payment rails for AI agents. Give every agent a wallet, enforce spending limits,
 
 - **Agent wallets** - one wallet per agent, scoped to an API key, with a USD ledger balance plus a Solana address and an EVM address.
 - **Spending limits** - per-transaction, daily, and weekly caps per wallet. Over-limit payments are automatically held in an approval queue instead of failing.
-- **Human-in-the-loop approvals** - approve or reject held payments with reason codes. Funds are re-checked at decision time, so money that moved while pending cannot be double-spent.
+- **Human-in-the-loop approvals** - approve or reject held payments with reason codes. Funds are re-checked at decision time, so money that moved while pending cannot be double-spent. Held payments expire after 24 hours by default (`APPROVAL_TTL_MS`) instead of waiting forever.
+- **Refunds** - refund a completed payment in full or in part. Refunds run backwards as their own payment linked to the original, cumulative refunds cannot exceed the original amount, and the recipient's balance is checked first.
+- **Wallet freeze** - freeze a wallet to stop it sending (and stop its held payments being approved) while still letting it receive. Unfreeze restores normal operation.
 - **Double-entry ledger** - every payment writes a debit and a credit in one transaction. Conservation is structural, not aspirational. Amounts are integer minor units with checked arithmetic.
 - **On-chain settlement** - settle a completed ledger payment over Solana as an SPL transfer on a local validator (2-decimal mint, so 1 cent = 1 base unit). EVM settlement is recorded as an honest local record; no chain is attached in this build.
 - **Audit log** - append-only. No update or delete path exists.
-- **Webhooks** - HMAC-SHA256 signed deliveries with exponential-backoff retries.
+- **Webhooks** - HMAC-SHA256 signed deliveries with exponential-backoff retries. Subscriptions can be paused, resumed, and deleted.
+- **Statements, limit usage, metrics** - per-wallet statement with running balances, live spent/remaining against each cap, and an admin metrics summary (counts by status, completed volume, delivery health).
 - **Auth and rate limiting** - bearer API keys with scopes (`read`, `wallets:write`, `payments:write`, `approvals:write`, `admin`), per-key token-bucket rate limiting.
 - **Dashboard** - React app for wallets, payments, the approval queue, and the audit log.
 
@@ -70,19 +73,25 @@ curl -X POST localhost:8787/v1/payments -H "Authorization: Bearer $AGENT" \
 curl -X POST localhost:8787/v1/approvals/<payment_id>/approve -H "Authorization: Bearer $AGENT" \
   -d '{"reason_code":"manager_ok"}'
 
+# refund (full, or pass {"amount": <minor>} for a partial one)
+curl -X POST localhost:8787/v1/payments/<payment_id>/refund -H "Authorization: Bearer $AGENT" -d '{}'
+
+# freeze a wallet that is misbehaving, unfreeze when sorted
+curl -X POST localhost:8787/v1/wallets/<id>/freeze -H "Authorization: Bearer $AGENT"
+
 # settle a completed payment (needs SETTLEMENT_MINT / SETTLEMENT_PAYER env, see demo.sh)
 curl -X POST localhost:8787/v1/payments/<payment_id>/settle -H "Authorization: Bearer $AGENT" \
   -d '{"rail":"solana"}'
 ```
 
-Amounts are integer cents. `GET /v1/audit` streams the audit log; `POST /v1/webhooks` subscribes a URL to events (`payment.completed`, `payment.pending_approval`, `payment.rejected`, `payment.failed`, `payment.settled`, `wallet.created`).
+Amounts are integer cents. `GET /v1/audit` streams the audit log; `POST /v1/webhooks` subscribes a URL to events (`payment.completed`, `payment.pending_approval`, `payment.rejected`, `payment.failed`, `payment.expired`, `payment.refunded`, `payment.settled`, `wallet.created`, `wallet.frozen`, `wallet.unfrozen`).
 
 ## Repo layout
 
 ```
 api/            Fastify API (TypeScript, SQLite via node:sqlite)
   src/          wallets, payments, approvals, settlement, webhooks, auth, ledger
-  test/         vitest suite (21 tests)
+  test/         vitest suite (39 tests)
   scripts/      solana demo setup
 dashboard/      React + Vite dashboard
 scripts/        UDP shim for sandboxed validators (see demo.sh)

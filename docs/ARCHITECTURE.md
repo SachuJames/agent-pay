@@ -36,6 +36,12 @@ Checked in order on every payment: per-transaction cap, then rolling daily spend
 
 Approval re-validates the balance inside the decision transaction. If funds moved while the payment was pending, the payment is marked `failed`, never partially applied.
 
+A held payment carries an `expires_at` (24h by default). A background sweep, plus lazy checks on the approval routes, moves stale holds to `expired`; they can no longer be approved. Freezing the sender wallet also blocks approval until it is unfrozen.
+
+## Refunds
+
+A refund is a completed payment in the opposite direction with `refund_of` pointing at the original. Refunds skip the spending caps (returning money is not spending) but run inside a transaction that checks the original recipient's balance, and the sum of refunds against a payment can never exceed its amount. A refund cannot itself be refunded.
+
 ## Idempotency
 
 `Idempotency-Key` header on `POST /v1/payments` and `POST /v1/wallets/:id/fund`. A repeated key returns the original payment without re-executing. The key has a UNIQUE constraint, so concurrent duplicates cannot double-spend.
@@ -47,11 +53,11 @@ Approval re-validates the balance inside the decision transaction. If funds move
 
 ## Webhooks
 
-Events are fanned out to active subscriptions matching the event name or `*`. Each delivery POSTs the JSON body with `X-AgentPay-Signature: sha256=<hmac>`. Failures retry with exponential backoff (2s, 4s, 8s, 16s); after 5 attempts the delivery parks as `failed`. A 2-second timer drains due deliveries; tests drive `drainWebhooks` directly.
+Events are fanned out to active subscriptions matching the event name or `*`. Pausing a subscription holds its queued deliveries and skips new events until it resumes; deleting one removes its queue with it. Each delivery POSTs the JSON body with `X-AgentPay-Signature: sha256=<hmac>`. Failures retry with exponential backoff (2s, 4s, 8s, 16s); after 5 attempts the delivery parks as `failed`. A 2-second timer drains due deliveries; tests drive `drainWebhooks` directly.
 
 ## Auth
 
-API keys are `agp_` prefixed random tokens, stored as SHA-256 hashes. Scopes: `read`, `wallets:write`, `payments:write`, `approvals:write`, `admin` (implies all). First boot prints a master key once.
+API keys are `agp_` prefixed random tokens, stored as SHA-256 hashes. Scopes: `read`, `wallets:write`, `payments:write`, `approvals:write`, `admin` (implies all). First boot prints a master key once. Keys track `last_used_at` (throttled to one write a minute) and can be listed by an admin without exposing hashes.
 
 ## What is intentionally not here
 
