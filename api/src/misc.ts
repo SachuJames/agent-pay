@@ -73,8 +73,8 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
     return { webhooks: rows };
   });
 
-  // Pause or resume a subscription. Pausing stops new deliveries and holds
-  // queued ones in place; resuming lets the drain pick them up again.
+  // Pause or resume a subscription. While paused, queued deliveries wait
+  // and new events are skipped; resuming lets the drain pick up the queue.
   app.patch("/v1/webhooks/:id", { preHandler: requireScope("admin") }, async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const body = (req.body ?? {}) as { active?: boolean };

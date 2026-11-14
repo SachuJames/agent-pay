@@ -510,10 +510,10 @@ describe("webhook management", () => {
     const sub = await postJson("/v1/webhooks", { url: `http://127.0.0.1:${port}/hook`, events: ["payment.completed"] });
     expect(sub.status).toBe(201);
 
+    await makeWallets(); // events queue up while the endpoint is active
     const paused = await patchJson(`/v1/webhooks/${sub.body.id}`, { active: false });
     expect(paused.status).toBe(200);
     expect(paused.body.active).toBe(0);
-    await makeWallets();
     await drainWebhooks(db);
     expect(received.length).toBe(0);
 
