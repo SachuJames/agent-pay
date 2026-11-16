@@ -133,10 +133,47 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
   });
 
   app.get("/v1/webhook-deliveries", { preHandler: requireScope("read") }, async (req) => {
-    const q = req.query as { limit?: string };
+    const q = req.query as { limit?: string; endpoint_id?: string; status?: string };
     const limit = Math.min(Number(q.limit ?? 50) || 50, 200);
-    const rows = db.prepare("SELECT * FROM webhook_deliveries ORDER BY id DESC LIMIT ?").all(limit);
+    const conds: string[] = [];
+    const vals: (string | number | null)[] = [];
+    if (q.endpoint_id) {
+      conds.push("endpoint_id = ?");
+      vals.push(q.endpoint_id);
+    }
+    if (q.status) {
+      conds.push("status = ?");
+      vals.push(q.status);
+    }
+    const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
+    const rows = db.prepare(`SELECT * FROM webhook_deliveries ${where} ORDER BY id DESC LIMIT ?`).all(...vals, limit);
     return { deliveries: rows };
+  });
+
+  // Requeue a delivery that parked as failed after its retries ran out.
+  // Attempts reset, so the endpoint gets a fresh set of tries; useful when
+  // the receiver was down and is back, without replaying the whole event
+  // stream by hand.
+  app.post("/v1/webhook-deliveries/:id/retry", { preHandler: requireScope("admin") }, async (req, reply) => {
+    const id = Number((req.params as { id: string }).id);
+    const row = db.prepare("SELECT id, status FROM webhook_deliveries WHERE id = ?").get(id) as
+      | { id: number; status: string }
+      | undefined;
+    if (!row) {
+      reply.code(404).send({ error: "delivery not found" });
+      return;
+    }
+    if (row.status !== "failed") {
+      reply.code(409).send({ error: `only failed deliveries can be retried (this one is ${row.status})` });
+      return;
+    }
+    db.prepare("UPDATE webhook_deliveries SET status='queued', attempts=0, next_attempt_at=?, last_error=NULL WHERE id = ?").run(
+      Date.now(),
+      id
+    );
+    audit(db, req.apiKey.name, "webhook.delivery_retried", "webhook_delivery", String(id), {});
+    const updated = db.prepare("SELECT * FROM webhook_deliveries WHERE id = ?").get(id);
+    reply.send(updated);
   });
 
   // Operational summary for dashboards and alerting: counts and volume,
