@@ -40,6 +40,30 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
     };
   });
 
+  // Rotate a key: mint a replacement with the same name and scopes, then
+  // revoke the old one. The raw replacement is returned once, like creation.
+  // Callers swap their stored key and the old one stops working immediately,
+  // so a leaked key can be replaced without a permissions gap in between.
+  app.post("/v1/api-keys/:id/rotate", { preHandler: requireScope("admin") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const row = db.prepare("SELECT id, name, scopes, revoked_at FROM api_keys WHERE id = ?").get(id) as
+      | { id: string; name: string; scopes: string; revoked_at: number | null }
+      | undefined;
+    if (!row) {
+      reply.code(404).send({ error: "api key not found" });
+      return;
+    }
+    if (row.revoked_at !== null) {
+      reply.code(409).send({ error: "cannot rotate a revoked key" });
+      return;
+    }
+    const scopes = JSON.parse(row.scopes) as Scope[];
+    const { id: newId, raw } = createApiKey(db, row.name, scopes);
+    db.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?").run(Date.now(), id);
+    audit(db, req.apiKey.name, "apikey.rotated", "api_key", id, { name: row.name, new_key_id: newId });
+    reply.code(201).send({ id: newId, key: raw, name: row.name, scopes, rotated_from: id });
+  });
+
   app.post("/v1/api-keys/:id/revoke", { preHandler: requireScope("admin") }, async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const row = db.prepare("SELECT id FROM api_keys WHERE id = ?").get(id);
