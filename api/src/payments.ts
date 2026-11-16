@@ -197,8 +197,16 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
   });
 
   app.get("/v1/payments", { preHandler: requireScope("read") }, async (req) => {
-    const q = req.query as { wallet_id?: string; status?: string; limit?: string };
+    const q = req.query as {
+      wallet_id?: string;
+      status?: string;
+      since?: string;
+      until?: string;
+      limit?: string;
+      offset?: string;
+    };
     const limit = Math.min(Number(q.limit ?? 50) || 50, 200);
+    const offset = Math.max(Number(q.offset ?? 0) || 0, 0);
     const conds: string[] = [];
     const vals: (string | number | null)[] = [];
     if (q.wallet_id) {
@@ -209,11 +217,21 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
       conds.push("status = ?");
       vals.push(q.status);
     }
+    // since/until are epoch milliseconds, matching created_at elsewhere.
+    if (q.since && Number.isFinite(Number(q.since))) {
+      conds.push("created_at >= ?");
+      vals.push(Number(q.since));
+    }
+    if (q.until && Number.isFinite(Number(q.until))) {
+      conds.push("created_at <= ?");
+      vals.push(Number(q.until));
+    }
     const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM payments ${where}`).get(...vals) as { n: number }).n;
     const rows = db
-      .prepare(`SELECT * FROM payments ${where} ORDER BY created_at DESC LIMIT ?`)
-      .all(...vals, limit) as Record<string, unknown>[];
-    return { payments: rows.map((r) => paymentView(r, refundedTotal(db, r.id as string))) };
+      .prepare(`SELECT * FROM payments ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .all(...vals, limit, offset) as Record<string, unknown>[];
+    return { payments: rows.map((r) => paymentView(r, refundedTotal(db, r.id as string))), total, limit, offset };
   });
 
   app.get("/v1/payments/:id", { preHandler: requireScope("read") }, async (req, reply) => {
