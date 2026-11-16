@@ -41,6 +41,51 @@ function rowToWallet(db: DatabaseSync, row: Record<string, unknown>) {
   };
 }
 
+export interface StatementEntry {
+  id: number;
+  payment_id: string;
+  direction: string;
+  amount_minor: number;
+  counterparty: string;
+  memo: string;
+  balance_after_minor: number;
+  created_at: number;
+}
+
+/** All ledger entries for a wallet, oldest first, with running balances. */
+export function statementEntries(db: DatabaseSync, walletId: string): StatementEntry[] {
+  const rows = db
+    .prepare(
+      `SELECT l.id, l.payment_id, l.direction, l.amount, l.created_at, p.memo,
+              CASE WHEN l.direction = 'debit' THEN p.to_wallet ELSE p.from_wallet END AS counterparty
+       FROM ledger_entries l JOIN payments p ON p.id = l.payment_id
+       WHERE l.wallet_id = ? ORDER BY l.id ASC`
+    )
+    .all(walletId) as {
+    id: number;
+    payment_id: string;
+    direction: string;
+    amount: number;
+    created_at: number;
+    memo: string;
+    counterparty: string;
+  }[];
+  let running = 0;
+  return rows.map((r) => {
+    running += r.direction === "credit" ? r.amount : -r.amount;
+    return {
+      id: r.id,
+      payment_id: r.payment_id,
+      direction: r.direction,
+      amount_minor: r.amount,
+      counterparty: r.counterparty,
+      memo: r.memo,
+      balance_after_minor: running,
+      created_at: r.created_at,
+    };
+  });
+}
+
 export function isFrozen(db: DatabaseSync, walletId: string): boolean {
   const row = db.prepare("SELECT frozen_at FROM wallets WHERE id = ?").get(walletId) as
     | { frozen_at: number | null }
@@ -129,39 +174,41 @@ export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
       reply.code(404).send({ error: "wallet not found" });
       return;
     }
-    const rows = db
-      .prepare(
-        `SELECT l.id, l.payment_id, l.direction, l.amount, l.created_at, p.memo,
-                CASE WHEN l.direction = 'debit' THEN p.to_wallet ELSE p.from_wallet END AS counterparty
-         FROM ledger_entries l JOIN payments p ON p.id = l.payment_id
-         WHERE l.wallet_id = ? ORDER BY l.id ASC`
-      )
-      .all(id) as {
-      id: number;
-      payment_id: string;
-      direction: string;
-      amount: number;
-      created_at: number;
-      memo: string;
-      counterparty: string;
-    }[];
-    let running = 0;
-    const entries = rows.map((r) => {
-      running += r.direction === "credit" ? r.amount : -r.amount;
-      return {
-        id: r.id,
-        payment_id: r.payment_id,
-        direction: r.direction,
-        amount_minor: r.amount,
-        counterparty: r.counterparty,
-        memo: r.memo,
-        balance_after_minor: running,
-        created_at: r.created_at,
-      };
-    });
+    const entries = statementEntries(db, id);
     const since = q.since ? Number(q.since) : null;
     const filtered = since ? entries.filter((e) => e.created_at >= since) : entries;
     reply.send({ wallet_id: id, balance_minor: balanceOf(db, id), entries: filtered.slice(-limit).reverse() });
+  });
+
+  // The same statement as a CSV download, oldest first, for spreadsheets
+  // and accounting imports. Amounts stay in minor units, like the API.
+  app.get("/v1/wallets/:id/statement.csv", { preHandler: requireScope("read") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const q = req.query as { since?: string };
+    const row = db.prepare("SELECT id FROM wallets WHERE id = ?").get(id);
+    if (!row) {
+      reply.code(404).send({ error: "wallet not found" });
+      return;
+    }
+    let entries = statementEntries(db, id);
+    const since = q.since ? Number(q.since) : null;
+    if (since) entries = entries.filter((e) => e.created_at >= since);
+    const esc = (v: unknown) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = ["id,payment_id,direction,amount_minor,counterparty,memo,balance_after_minor,created_at"];
+    for (const e of entries) {
+      lines.push(
+        [e.id, e.payment_id, e.direction, e.amount_minor, e.counterparty, e.memo, e.balance_after_minor, e.created_at]
+          .map(esc)
+          .join(",")
+      );
+    }
+    reply
+      .header("content-type", "text/csv")
+      .header("content-disposition", `attachment; filename="statement-${id}.csv"`)
+      .send(lines.join("\n") + "\n");
   });
 
   // How much of each spending window is used up right now. The same numbers
