@@ -9,6 +9,10 @@ Payment rails for AI agents. Give every agent a wallet, enforce spending limits,
 
 ![AgentPay hero](docs/assets/hero-banner.webp)
 
+![AgentPay demo](docs/assets/demo.gif)
+
+The payment lifecycle in a terminal: fund a capped wallet, pay within the limit, watch an over-limit payment get held, approve it, refund part of it. Recorded live against the API on a fresh database.
+
 ## What it does
 
 - **Agent wallets** - one wallet per agent, scoped to an API key, with a USD ledger balance plus a Solana address and an EVM address.
