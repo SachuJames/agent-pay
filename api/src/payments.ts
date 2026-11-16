@@ -107,101 +107,150 @@ function limitVerdict(
   return { ok: true };
 }
 
+export interface PaymentInput {
+  from_wallet?: string;
+  to_wallet?: string;
+  amount?: number;
+  memo?: string;
+}
+
+export type CreatePaymentResult =
+  | { statusCode: number; payment: Record<string, unknown> }
+  | { statusCode: number; errorBody: Record<string, unknown> };
+
+/**
+ * Create one payment with the full rule set: validation, frozen and
+ * allowlist checks, idempotency, balance, then limits (breach holds the
+ * payment for approval instead of failing it). Shared by the single
+ * payment route and the batch route so both behave identically.
+ */
+export function createPayment(
+  db: DatabaseSync,
+  actor: string,
+  body: PaymentInput,
+  idemKey: string | null
+): CreatePaymentResult {
+  if (!body.from_wallet || !body.to_wallet || body.amount === undefined) {
+    return { statusCode: 400, errorBody: { error: "from_wallet, to_wallet and amount are required" } };
+  }
+  if (body.from_wallet === body.to_wallet) {
+    return { statusCode: 400, errorBody: { error: "from_wallet and to_wallet must differ" } };
+  }
+  try {
+    assertAmount(body.amount);
+  } catch {
+    return { statusCode: 400, errorBody: { error: "amount must be a non-negative integer of minor units" } };
+  }
+  const from = db.prepare("SELECT id, frozen_at FROM wallets WHERE id = ?").get(body.from_wallet) as
+    | { id: string; frozen_at: number | null }
+    | undefined;
+  const to = db.prepare("SELECT id FROM wallets WHERE id = ?").get(body.to_wallet);
+  if (!from || !to) {
+    return { statusCode: 404, errorBody: { error: "unknown wallet" } };
+  }
+  if (from.frozen_at != null) {
+    return { statusCode: 403, errorBody: { error: "sender wallet is frozen" } };
+  }
+  // A wallet with a recipient allowlist can only pay wallets on it.
+  // Refunds do not pass through here, so an allowlist can never trap
+  // money that has to go back.
+  const allowlist = allowlistOf(db, body.from_wallet);
+  if (allowlist.length > 0 && !allowlist.includes(body.to_wallet)) {
+    return { statusCode: 403, errorBody: { error: "recipient is not on the sender wallet allowlist" } };
+  }
+
+  // Idempotency: same key returns the original payment, never re-executes.
+  if (idemKey) {
+    const existing = db.prepare("SELECT * FROM payments WHERE idempotency_key = ?").get(idemKey) as
+      | Record<string, unknown>
+      | undefined;
+    if (existing) {
+      return { statusCode: 200, payment: paymentView(existing, refundedTotal(db, existing.id as string)) };
+    }
+  }
+
+  const id = "pay_" + randomUUID().slice(0, 12);
+  const payment: NewPayment = {
+    id,
+    from: body.from_wallet,
+    to: body.to_wallet,
+    amount: body.amount,
+    memo: body.memo ?? "",
+    idempotencyKey: idemKey,
+  };
+
+  if (balanceOf(db, payment.from) < payment.amount) {
+    return { statusCode: 402, errorBody: { error: "insufficient funds", balance_minor: balanceOf(db, payment.from) } };
+  }
+
+  const verdict = limitVerdict(db, payment.from, payment.amount);
+  if (!verdict.ok) {
+    const t = now();
+    db.prepare(
+      "INSERT INTO payments (id, from_wallet, to_wallet, amount, memo, status, idempotency_key, created_at, reason_code, expires_at) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?)"
+    ).run(id, payment.from, payment.to, payment.amount, payment.memo, idemKey, t, verdict.reason, t + APPROVAL_TTL_MS);
+    audit(db, actor, "payment.held_for_approval", "payment", id, {
+      reason: verdict.reason,
+      amount: payment.amount,
+    });
+    emit(db, "payment.pending_approval", {
+      payment_id: id,
+      from_wallet: payment.from,
+      to_wallet: payment.to,
+      amount: payment.amount,
+      reason_code: verdict.reason,
+    });
+    const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
+    return { statusCode: 202, payment: paymentView(p as Record<string, unknown>) };
+  }
+
+  try {
+    recordCompletedPayment(db, payment, actor);
+  } catch (err) {
+    return { statusCode: 402, errorBody: { error: String(err instanceof Error ? err.message : err) } };
+  }
+  const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
+  return { statusCode: 201, payment: paymentView(p as Record<string, unknown>) };
+}
+
 export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
   app.post("/v1/payments", { preHandler: requireScope("payments:write") }, async (req, reply) => {
-    const body = (req.body ?? {}) as { from_wallet?: string; to_wallet?: string; amount?: number; memo?: string };
-    if (!body.from_wallet || !body.to_wallet || body.amount === undefined) {
-      reply.code(400).send({ error: "from_wallet, to_wallet and amount are required" });
-      return;
-    }
-    if (body.from_wallet === body.to_wallet) {
-      reply.code(400).send({ error: "from_wallet and to_wallet must differ" });
-      return;
-    }
-    try {
-      assertAmount(body.amount);
-    } catch {
-      reply.code(400).send({ error: "amount must be a non-negative integer of minor units" });
-      return;
-    }
-    const from = db.prepare("SELECT id, frozen_at FROM wallets WHERE id = ?").get(body.from_wallet) as
-      | { id: string; frozen_at: number | null }
-      | undefined;
-    const to = db.prepare("SELECT id FROM wallets WHERE id = ?").get(body.to_wallet);
-    if (!from || !to) {
-      reply.code(404).send({ error: "unknown wallet" });
-      return;
-    }
-    if (from.frozen_at != null) {
-      reply.code(403).send({ error: "sender wallet is frozen" });
-      return;
-    }
-    // A wallet with a recipient allowlist can only pay wallets on it.
-    // Refunds do not pass through here, so an allowlist can never trap
-    // money that has to go back.
-    const allowlist = allowlistOf(db, body.from_wallet);
-    if (allowlist.length > 0 && !allowlist.includes(body.to_wallet)) {
-      reply.code(403).send({ error: "recipient is not on the sender wallet allowlist" });
-      return;
-    }
-
-    // Idempotency: same key returns the original payment, never re-executes.
     const idemKey = (req.headers["idempotency-key"] as string) || null;
-    if (idemKey) {
-      const existing = db.prepare("SELECT * FROM payments WHERE idempotency_key = ?").get(idemKey) as
-        | Record<string, unknown>
-        | undefined;
-      if (existing) {
-        reply.send(paymentView(existing));
-        return;
+    const r = createPayment(db, req.apiKey.name, (req.body ?? {}) as PaymentInput, idemKey);
+    if ("errorBody" in r) {
+      reply.code(r.statusCode).send(r.errorBody);
+      return;
+    }
+    reply.code(r.statusCode).send(r.payment);
+  });
+
+  // Batch submission: each item runs the same rules as a single payment,
+  // in order, and one bad item never blocks the rest. Items may carry
+  // their own idempotency_key. The response reports every item's outcome.
+  app.post("/v1/payments/batch", { preHandler: requireScope("payments:write") }, async (req, reply) => {
+    const body = (req.body ?? {}) as { payments?: unknown };
+    if (!Array.isArray(body.payments) || body.payments.length === 0) {
+      reply.code(400).send({ error: "payments must be a non-empty array" });
+      return;
+    }
+    if (body.payments.length > 50) {
+      reply.code(400).send({ error: "batch is limited to 50 payments" });
+      return;
+    }
+    const results = (body.payments as (PaymentInput & { idempotency_key?: string })[]).map((item, index) => {
+      const r = createPayment(db, req.apiKey.name, item ?? {}, item?.idempotency_key ?? null);
+      if ("errorBody" in r) {
+        return { index, ok: false, status_code: r.statusCode, error: r.errorBody.error, balance_minor: r.errorBody.balance_minor };
       }
-    }
-
-    const id = "pay_" + randomUUID().slice(0, 12);
-    const payment: NewPayment = {
-      id,
-      from: body.from_wallet,
-      to: body.to_wallet,
-      amount: body.amount,
-      memo: body.memo ?? "",
-      idempotencyKey: idemKey,
+      return { index, ok: true, status_code: r.statusCode, payment: r.payment };
+    });
+    const summary = {
+      total: results.length,
+      completed: results.filter((r) => r.ok && r.payment?.status === "completed").length,
+      held: results.filter((r) => r.ok && r.payment?.status === "pending_approval").length,
+      failed: results.filter((r) => !r.ok).length,
     };
-
-    if (balanceOf(db, payment.from) < payment.amount) {
-      reply.code(402).send({ error: "insufficient funds", balance_minor: balanceOf(db, payment.from) });
-      return;
-    }
-
-    const verdict = limitVerdict(db, payment.from, payment.amount);
-    if (!verdict.ok) {
-      const t = now();
-      db.prepare(
-        "INSERT INTO payments (id, from_wallet, to_wallet, amount, memo, status, idempotency_key, created_at, reason_code, expires_at) VALUES (?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?)"
-      ).run(id, payment.from, payment.to, payment.amount, payment.memo, idemKey, t, verdict.reason, t + APPROVAL_TTL_MS);
-      audit(db, req.apiKey.name, "payment.held_for_approval", "payment", id, {
-        reason: verdict.reason,
-        amount: payment.amount,
-      });
-      emit(db, "payment.pending_approval", {
-        payment_id: id,
-        from_wallet: payment.from,
-        to_wallet: payment.to,
-        amount: payment.amount,
-        reason_code: verdict.reason,
-      });
-      const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
-      reply.code(202).send(paymentView(p as Record<string, unknown>));
-      return;
-    }
-
-    try {
-      recordCompletedPayment(db, payment, req.apiKey.name);
-    } catch (err) {
-      reply.code(402).send({ error: String(err instanceof Error ? err.message : err) });
-      return;
-    }
-    const p = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
-    reply.code(201).send(paymentView(p as Record<string, unknown>));
+    reply.send({ results, summary });
   });
 
   app.get("/v1/payments", { preHandler: requireScope("read") }, async (req) => {
