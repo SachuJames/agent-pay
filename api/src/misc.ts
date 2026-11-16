@@ -209,8 +209,18 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
 
   // Audit log (read-only; append-only by design).
   app.get("/v1/audit", { preHandler: requireScope("read") }, async (req) => {
-    const q = req.query as { entity?: string; entity_id?: string; limit?: string };
+    const q = req.query as {
+      entity?: string;
+      entity_id?: string;
+      action?: string;
+      actor?: string;
+      since?: string;
+      until?: string;
+      limit?: string;
+      offset?: string;
+    };
     const limit = Math.min(Number(q.limit ?? 50) || 50, 200);
+    const offset = Math.max(Number(q.offset ?? 0) || 0, 0);
     const conds: string[] = [];
     const vals: (string | number | null)[] = [];
     if (q.entity) {
@@ -221,8 +231,25 @@ export function registerMiscRoutes(app: FastifyInstance, db: DatabaseSync) {
       conds.push("entity_id = ?");
       vals.push(q.entity_id);
     }
+    if (q.action) {
+      conds.push("action = ?");
+      vals.push(q.action);
+    }
+    if (q.actor) {
+      conds.push("actor = ?");
+      vals.push(q.actor);
+    }
+    if (q.since && Number.isFinite(Number(q.since))) {
+      conds.push("created_at >= ?");
+      vals.push(Number(q.since));
+    }
+    if (q.until && Number.isFinite(Number(q.until))) {
+      conds.push("created_at <= ?");
+      vals.push(Number(q.until));
+    }
     const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
-    const rows = db.prepare(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ?`).all(...vals, limit);
-    return { audit: rows };
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM audit_log ${where}`).get(...vals) as { n: number }).n;
+    const rows = db.prepare(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...vals, limit, offset);
+    return { audit: rows, total, limit, offset };
   });
 }
