@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import { balanceOf, now, spendSince, withTx } from "./db.js";
+import { allowlistOf, balanceOf, now, spendSince, withTx } from "./db.js";
 import { assertAmount, formatMinor } from "./money.js";
 import { requireScope } from "./auth.js";
 import { audit } from "./audit.js";
@@ -134,6 +134,14 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync) {
     }
     if (from.frozen_at != null) {
       reply.code(403).send({ error: "sender wallet is frozen" });
+      return;
+    }
+    // A wallet with a recipient allowlist can only pay wallets on it.
+    // Refunds do not pass through here, so an allowlist can never trap
+    // money that has to go back.
+    const allowlist = allowlistOf(db, body.from_wallet);
+    if (allowlist.length > 0 && !allowlist.includes(body.to_wallet)) {
+      reply.code(403).send({ error: "recipient is not on the sender wallet allowlist" });
       return;
     }
 

@@ -86,6 +86,12 @@ export function openDb(path: string): DatabaseSync {
   addColumn(db, "wallets", "frozen_at", "frozen_at INTEGER");
   addColumn(db, "api_keys", "last_used_at", "last_used_at INTEGER");
   db.exec(`
+    CREATE TABLE IF NOT EXISTS wallet_allowlists (
+      wallet_id TEXT NOT NULL REFERENCES wallets(id),
+      recipient_id TEXT NOT NULL REFERENCES wallets(id),
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (wallet_id, recipient_id)
+    );
     CREATE TABLE IF NOT EXISTS settlements (
       id TEXT PRIMARY KEY,
       payment_id TEXT NOT NULL REFERENCES payments(id),
@@ -134,6 +140,14 @@ export function balanceOf(db: DatabaseSync, walletId: string): number {
     )
     .get(walletId) as { b: number };
   return row.b;
+}
+
+/** Recipients a wallet is allowed to pay. Empty means no restriction. */
+export function allowlistOf(db: DatabaseSync, walletId: string): string[] {
+  const rows = db
+    .prepare("SELECT recipient_id FROM wallet_allowlists WHERE wallet_id = ? ORDER BY recipient_id")
+    .all(walletId) as { recipient_id: string }[];
+  return rows.map((r) => r.recipient_id);
 }
 
 /** Sum of completed outbound payments in the last `windowMs`. */

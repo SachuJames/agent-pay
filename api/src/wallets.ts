@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import { balanceOf, now, spendSince } from "./db.js";
+import { allowlistOf, balanceOf, now, spendSince, withTx } from "./db.js";
 import { assertAmount, formatMinor } from "./money.js";
 import { requireScope } from "./auth.js";
 import { audit } from "./audit.js";
@@ -34,6 +34,7 @@ function rowToWallet(db: DatabaseSync, row: Record<string, unknown>) {
     },
     solana_address: row.solana_pubkey,
     evm_address: row.evm_address,
+    allowlist: allowlistOf(db, row.id as string),
     frozen: row.frozen_at != null,
     frozen_at: (row.frozen_at as number | null) ?? null,
     created_at: row.created_at,
@@ -214,6 +215,54 @@ export function registerWalletRoutes(app: FastifyInstance, db: DatabaseSync) {
     audit(db, req.apiKey.name, "wallet.limits_updated", "wallet", id, body);
     const updated = db.prepare("SELECT * FROM wallets WHERE id = ?").get(id) as Record<string, unknown>;
     reply.send(rowToWallet(db, updated));
+  });
+
+  // Recipient allowlist: while a wallet has one, it can only pay wallets on
+  // the list. An empty list means no restriction. Setting the list replaces
+  // it wholesale, so what you PUT is exactly what is enforced afterwards.
+  app.get("/v1/wallets/:id/allowlist", { preHandler: requireScope("read") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const row = db.prepare("SELECT id FROM wallets WHERE id = ?").get(id);
+    if (!row) {
+      reply.code(404).send({ error: "wallet not found" });
+      return;
+    }
+    reply.send({ wallet_id: id, recipients: allowlistOf(db, id) });
+  });
+
+  app.put("/v1/wallets/:id/allowlist", { preHandler: requireScope("wallets:write") }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const body = (req.body ?? {}) as { recipients?: unknown };
+    const row = db.prepare("SELECT id FROM wallets WHERE id = ?").get(id);
+    if (!row) {
+      reply.code(404).send({ error: "wallet not found" });
+      return;
+    }
+    if (!Array.isArray(body.recipients) || body.recipients.some((r) => typeof r !== "string")) {
+      reply.code(400).send({ error: "recipients must be an array of wallet ids" });
+      return;
+    }
+    const recipients = [...new Set(body.recipients as string[])];
+    if (recipients.includes(id)) {
+      reply.code(400).send({ error: "a wallet cannot allowlist itself" });
+      return;
+    }
+    for (const r of recipients) {
+      if (!db.prepare("SELECT id FROM wallets WHERE id = ?").get(r)) {
+        reply.code(400).send({ error: `unknown recipient wallet: ${r}` });
+        return;
+      }
+    }
+    withTx(db, () => {
+      db.prepare("DELETE FROM wallet_allowlists WHERE wallet_id = ?").run(id);
+      const t = now();
+      for (const r of recipients) {
+        db.prepare("INSERT INTO wallet_allowlists (wallet_id, recipient_id, created_at) VALUES (?, ?, ?)").run(id, r, t);
+      }
+    });
+    audit(db, req.apiKey.name, "wallet.allowlist_updated", "wallet", id, { recipients });
+    emit(db, "wallet.allowlist_updated", { wallet_id: id, recipients });
+    reply.send({ wallet_id: id, recipients: allowlistOf(db, id) });
   });
 
   // Freeze or unfreeze a wallet. A frozen wallet cannot send payments and
