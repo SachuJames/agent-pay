@@ -37,4 +37,19 @@ export const api = {
   freeze: (id: string) => req("POST", `/v1/wallets/${id}/freeze`, {}),
   unfreeze: (id: string) => req("POST", `/v1/wallets/${id}/unfreeze`, {}),
   refund: (id: string) => req("POST", `/v1/payments/${id}/refund`, {}),
+  setAllowlist: (id: string, recipients: string[]) => req("PUT", `/v1/wallets/${id}/allowlist`, { recipients }),
+  webhooks: () => req("GET", "/v1/webhooks"),
+  deliveries: () => req("GET", "/v1/webhook-deliveries?limit=100"),
+  retryDelivery: (id: number) => req("POST", `/v1/webhook-deliveries/${id}/retry`, {}),
+  statementCsv: async (id: string) => {
+    const res = await fetch(`/v1/wallets/${id}/statement.csv`, { headers: { authorization: `Bearer ${key()}` } });
+    if (!res.ok) throw new Error(`http ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `statement-${id}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
 };

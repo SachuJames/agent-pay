@@ -40,7 +40,7 @@ const css = `
 interface Wallet {
   id: string; name: string; agent_id: string; balance: string; frozen?: boolean;
   limits: { per_tx_cap: number; daily_cap: number; weekly_cap: number };
-  solana_address: string; evm_address: string;
+  solana_address: string; evm_address: string; allowlist?: string[];
 }
 interface Payment {
   id: string; from_wallet: string; to_wallet: string; amount: string;
@@ -68,6 +68,27 @@ function WalletUsage({ id }: { id: string }) {
   );
 }
 interface AuditRow { id: number; actor: string; action: string; entity: string; entity_id: string; created_at: number; details: string }
+interface WebhookRow { id: string; url: string; events: string; active: number }
+interface DeliveryRow { id: number; endpoint_id: string; event: string; status: string; attempts: number; last_error: string | null }
+
+function AllowlistEditor({ id, current, onSaved }: { id: string; current: string[]; onSaved: () => void }) {
+  const [val, setVal] = useState(current.join(", "));
+  useEffect(() => { setVal(current.join(", ")); }, [current.join(", ")]);
+  const save = async () => {
+    const recipients = val.split(",").map((s) => s.trim()).filter(Boolean);
+    await api.setAllowlist(id, recipients);
+    onSaved();
+  };
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="muted">can pay (wallet ids, blank = anyone)</div>
+      <div className="row" style={{ marginTop: 6, marginBottom: 0 }}>
+        <input value={val} onChange={(e) => setVal(e.target.value)} placeholder="w_..., w_..." style={{ flex: 1 }} />
+        <button className="ghost" onClick={save}>Save</button>
+      </div>
+    </div>
+  );
+}
 
 function usePoll<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -132,9 +153,11 @@ function Wallets() {
             <div className="muted mono" style={{ marginTop: 6 }}>sol: {w.solana_address?.slice(0, 12)}...</div>
             <div className="muted">limits: tx ${(+w.limits.per_tx_cap / 100).toFixed(0)} / day ${(+w.limits.daily_cap / 100).toFixed(0)} / wk ${(+w.limits.weekly_cap / 100).toFixed(0)}</div>
             <WalletUsage id={w.id} />
+            <AllowlistEditor id={w.id} current={w.allowlist ?? []} onSaved={reload} />
             <div className="row" style={{ marginTop: 10, marginBottom: 0 }}>
               <button className="ghost" onClick={async () => { await api.fund(w.id, 100000); reload(); }}>Fund $1,000</button>
               <button className="ghost" onClick={async () => { await (w.frozen ? api.unfreeze(w.id) : api.freeze(w.id)); reload(); }}>{w.frozen ? "Unfreeze" : "Freeze"}</button>
+              <button className="ghost" onClick={() => api.statementCsv(w.id)}>Statement CSV</button>
             </div>
           </div>
         ))}
@@ -144,7 +167,8 @@ function Wallets() {
 }
 
 function Payments() {
-  const { data, err, reload } = usePoll(async () => (await api.payments()) as { payments: Payment[] });
+  const [status, setStatus] = useState("");
+  const { data, err, reload } = usePoll(async () => (await api.payments(status || undefined)) as { payments: Payment[] }, [status]);
   const { data: wallets } = usePoll(async () => (await api.wallets()) as { wallets: Wallet[] });
   const [form, setForm] = useState({ from: "", to: "", amount: "", memo: "" });
   const pay = async () => {
@@ -172,6 +196,15 @@ function Payments() {
         <div className="muted">Over-limit payments are held for approval automatically.</div>
       </div>
       {err && <div className="err">{err}</div>}
+      <div className="row">
+        <span className="muted">show</span>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">all statuses</option>
+          {["completed", "pending_approval", "rejected", "failed", "expired"].map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </div>
       <div className="card">
         <table>
           <thead><tr><th>ID</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Memo</th><th></th></tr></thead>
@@ -229,6 +262,52 @@ function Approvals() {
   );
 }
 
+function Webhooks() {
+  const { data: eps } = usePoll(async () => (await api.webhooks()) as { webhooks: WebhookRow[] });
+  const { data, err, reload } = usePoll(async () => (await api.deliveries()) as { deliveries: DeliveryRow[] });
+  return (
+    <div>
+      <div className="card">
+        <h2>Subscriptions</h2>
+        {(eps?.webhooks ?? []).length === 0 && <div className="muted">No subscriptions yet.</div>}
+        <table>
+          <tbody>
+            {(eps?.webhooks ?? []).map((w) => (
+              <tr key={w.id}>
+                <td className="mono">{w.url}</td>
+                <td className="mono">{w.events}</td>
+                <td>{w.active ? <span className="pill completed">active</span> : <span className="pill expired">paused</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="card">
+        <h2>Recent deliveries</h2>
+        {err && <div className="err">{err}</div>}
+        <table>
+          <thead><tr><th>Event</th><th>Status</th><th>Attempts</th><th>Last error</th><th></th></tr></thead>
+          <tbody>
+            {(data?.deliveries ?? []).map((d) => (
+              <tr key={d.id}>
+                <td className="mono">{d.event}</td>
+                <td><span className={`pill ${d.status === "delivered" ? "completed" : d.status === "failed" ? "failed" : "expired"}`}>{d.status}</span></td>
+                <td>{d.attempts}</td>
+                <td className="muted">{d.last_error ?? ""}</td>
+                <td>
+                  {d.status === "failed" && (
+                    <button className="ghost" onClick={async () => { await api.retryDelivery(d.id); reload(); }}>Retry</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Audit() {
   const { data, err } = usePoll(async () => (await api.audit()) as { audit: AuditRow[] });
   return (
@@ -265,7 +344,7 @@ export default function App() {
           </div>
         </header>
         <nav>
-          {(["wallets", "payments", "approvals", "audit"] as const).map((t) => (
+          {(["wallets", "payments", "approvals", "webhooks", "audit"] as const).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
               {t[0].toUpperCase() + t.slice(1)}
             </button>
@@ -274,6 +353,7 @@ export default function App() {
         {tab === "wallets" && <Wallets />}
         {tab === "payments" && <Payments />}
         {tab === "approvals" && <Approvals />}
+        {tab === "webhooks" && <Webhooks />}
         {tab === "audit" && <Audit />}
       </div>
     </KeyGate>
