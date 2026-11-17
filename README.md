@@ -1,17 +1,37 @@
-# AgentPay
+<p align="center">
+  <img src="docs/assets/hero-banner.webp" alt="Small agents sending payment streams into one guarded vault" width="100%">
+</p>
 
-![MIT](https://img.shields.io/badge/license-MIT-green)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)
-![Fastify](https://img.shields.io/badge/Fastify-5-black)
-![Solana](https://img.shields.io/badge/Solana-settlement-9945FF)
+<h1 align="center">AgentPay</h1>
 
-Payment rails for AI agents. Give every agent a wallet, enforce spending limits, hold over-limit payments for human approval, and settle on-chain. Every state change is audited, every mutation is idempotent, every webhook is signed.
+<p align="center">
+  <strong>Payment rails for AI agents.</strong> Give every agent a wallet, enforce spending limits, hold over-limit payments for human approval, and settle on-chain. Every state change is audited, every mutation is idempotent, every webhook is signed.
+</p>
 
-![AgentPay hero](docs/assets/hero-banner.webp)
+<p align="center">
+  <a href="https://github.com/SachuJames/agent-pay/releases"><img src="https://img.shields.io/github/v/release/SachuJames/agent-pay" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+  <img src="https://img.shields.io/badge/TypeScript-5.7-blue" alt="TypeScript 5.7">
+  <img src="https://img.shields.io/badge/Fastify-5-black" alt="Fastify 5">
+  <img src="https://img.shields.io/badge/Solana-settlement-9945FF" alt="Solana settlement">
+</p>
 
-![AgentPay demo](docs/assets/demo.gif)
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="Terminal demo: a capped wallet pays, gets held, is approved, and refunds" width="880">
+</p>
 
-The payment lifecycle in a terminal: fund a capped wallet, pay within the limit, watch an over-limit payment get held, approve it, refund part of it. Recorded live against the API on a fresh database.
+<p align="center">
+  <em>One payment lifecycle, live against the API on a fresh database: fund a capped wallet, pay within the limit, watch an over-limit payment get held, approve it, refund part of it.</em>
+</p>
+
+## Highlights
+
+| | |
+| --- | --- |
+| **Wallets with caps**<br>One wallet per agent, with per-transaction, daily, and weekly spending limits. | **Held, not failed**<br>Over-limit payments wait in an approval queue for a human instead of bouncing. |
+| **Refunds that behave**<br>Full or partial, capped at the original amount, with the balance checked before money moves back. | **Double-entry ledger**<br>Every payment writes a debit and a credit in one transaction, in integer minor units. |
+| **On-chain settlement**<br>Completed payments settle over Solana as SPL transfers on a local validator. | **Signed webhooks**<br>HMAC-SHA256 deliveries with backoff retries, pause and resume, and manual requeue. |
+| **Scoped API keys**<br>Bearer keys scoped per agent, rate limited, and rotatable in a single call. | **Audit log**<br>An append-only record of every state change, searchable by action, actor, and time. |
 
 ## What it does
 
